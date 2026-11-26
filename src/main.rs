@@ -1,3 +1,6 @@
+// no console window behind the ui on windows
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use async_channel::Sender;
 use gpui::{
     App, Application, Bounds, Context, FocusHandle, FontWeight, KeyDownEvent, MouseButton, Render,
