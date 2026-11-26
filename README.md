@@ -21,6 +21,25 @@ The token is never stored in the repo. It is read from:
 1. `$DISCORD_TOKEN`
 2. `~/.config/rustcord/token`
 
+## prebuilt binary
+
+`dist/rustcord-linux-x86_64` is a stripped release build for linux x86_64 (glibc).
+It is not static, it needs these shared libs at runtime:
+
+```sh
+libxkbcommon.so.0 libxkbcommon-x11.so.0 libxcb.so.1 libXau.so.6 libXdmcp.so.6
+```
+
+plus a working vulkan driver (gpui renders through vulkan; llvmpipe/mesa works).
+
+```sh
+chmod +x rustcord-linux-x86_64
+DISCORD_TOKEN='...' ./rustcord-linux-x86_64
+```
+
+checksums are in `dist/SHA256SUMS`. There is no windows build; gpui's windows
+backend needs the msvc toolchain and can't be cross-compiled from here.
+
 ## build
 
 gpui is not on crates.io and links against system graphics libraries. On debian:
