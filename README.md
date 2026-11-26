@@ -19,7 +19,8 @@ Use at your own risk.
 The token is never stored in the repo. It is read from:
 
 1. `$DISCORD_TOKEN`
-2. `~/.config/rustcord/token`
+2. a token file: `$XDG_CONFIG_HOME/rustcord/token` (or `~/.config/rustcord/token`) on
+   linux/macos, `%APPDATA%\rustcord\token` on windows
 
 ## prebuilt binary
 
@@ -66,7 +67,7 @@ export DISCORD_TOKEN='...'
 cargo run --release
 ```
 
-or write the token to `~/.config/rustcord/token`.
+or write the token to the config path above.
 
 ## headless smoke test
 

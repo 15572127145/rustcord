@@ -55,7 +55,7 @@ impl Rustcord {
             Some(token) => discord::spawn_worker(token, command_rx, event_tx),
             None => {
                 error = Some(
-                    "no token found. set DISCORD_TOKEN or write it to ~/.config/rustcord/token"
+                    "no token found. set DISCORD_TOKEN or write it to the rustcord config dir"
                         .to_string(),
                 );
                 status = "offline".to_string();
@@ -612,13 +612,22 @@ fn load_token() -> Option<String> {
         }
     }
 
-    let path = std::env::var("HOME")
-        .ok()
-        .map(|home| format!("{home}/.config/rustcord/token"))?;
-    std::fs::read_to_string(path)
+    std::fs::read_to_string(token_path()?)
         .ok()
         .map(|token| token.trim().to_string())
         .filter(|token| !token.is_empty())
+}
+
+/// `%APPDATA%\rustcord\token` on windows, `$XDG_CONFIG_HOME|~/.config/rustcord/token` elsewhere.
+fn token_path() -> Option<std::path::PathBuf> {
+    let base = if cfg!(windows) {
+        std::env::var_os("APPDATA").map(std::path::PathBuf::from)
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config")))
+    }?;
+    Some(base.join("rustcord").join("token"))
 }
 
 fn main() {
