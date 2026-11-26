@@ -2,6 +2,8 @@
 
 A discord desktop client written in rust with [gpui](https://gpui.rs) (zed's gpu-accelerated ui framework).
 
+yes this is slop, no i don't care
+
 ## what works
 
 - logs in with a **user token** and shows the account in the sidebar
