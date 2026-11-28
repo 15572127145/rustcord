@@ -26,6 +26,7 @@ pub enum Event {
     MessageCreated(Message),
     MessageSent(Message),
     Error(String),
+    LoginFailed(String),
     Status(String),
 }
 
@@ -70,7 +71,7 @@ pub fn spawn_worker(token: String, commands: Receiver<Command>, events: Sender<E
                     }
                     Err(err) => {
                         let _ = events
-                            .send(Event::Error(format!("login failed: {err}")))
+                            .send(Event::LoginFailed(format!("login failed: {err}")))
                             .await;
                     }
                 }

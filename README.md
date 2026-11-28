@@ -6,7 +6,9 @@ yes this is slop, no i don't care
 
 ## what works
 
-- logs in with a **user token** and shows the account in the sidebar
+- logs in with a **user token**: typed or pasted into the login screen after launch, or
+  picked up from `$DISCORD_TOKEN` / the token file on startup
+- sign out and paste a different token without restarting
 - server rail with your guilds plus a `DM` button
 - channel list per server, dm/group-dm list for dms
 - message history per channel, live updates over the discord gateway
@@ -18,11 +20,16 @@ This uses a **user token**, which is against discord's terms of service and can 
 account banned. Bots are the sanctioned path, but they can't see friends, dm lists, etc.
 Use at your own risk.
 
-The token is never stored in the repo. It is read from:
+The token is never stored in the repo. On startup it is read from:
 
 1. `$DISCORD_TOKEN`
 2. a token file: `$XDG_CONFIG_HOME/rustcord/token` (or `~/.config/rustcord/token`) on
    linux/macos, `%APPDATA%\rustcord\token` on windows
+3. otherwise (or if the one found is rejected) the app opens a login screen where you
+   paste the token with `ctrl+v` / `cmd+v` and hit enter or `login`
+
+Tokens pasted into the login screen are only kept in memory, they are not written to the
+token file. `sign out` in the bottom left goes back to the login screen.
 
 ## prebuilt binary
 
@@ -65,11 +72,16 @@ longer compiles against current `libc` (`ENOATTR` was removed on linux).
 ## run
 
 ```sh
-export DISCORD_TOKEN='...'
 cargo run --release
 ```
 
-or write the token to the config path above.
+then paste a token into the login screen, or export `DISCORD_TOKEN` / write the token to
+the config path above to skip it.
+
+```sh
+export DISCORD_TOKEN='...'
+cargo run --release
+```
 
 ## headless smoke test
 

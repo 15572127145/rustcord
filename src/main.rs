@@ -41,50 +41,24 @@ struct Rustcord {
     input: String,
     input_focus: FocusHandle,
     messages_scroll: ScrollHandle,
-    commands: Sender<Command>,
+    commands: Option<Sender<Command>>,
     status: String,
     error: Option<String>,
     loading: bool,
+    login_open: bool,
+    token_input: String,
+    login_error: Option<String>,
+    connecting: bool,
+    /// bumped on every login/sign out so events from an old worker are ignored
+    session: u64,
 }
 
 impl Rustcord {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (command_tx, command_rx) = async_channel::unbounded();
-        let (event_tx, event_rx) = async_channel::unbounded();
-        let mut error = None;
-        let mut status = "connecting to discord...".to_string();
-
-        match load_token() {
-            Some(token) => discord::spawn_worker(token, command_rx, event_tx),
-            None => {
-                error = Some(
-                    "no token found. set DISCORD_TOKEN or write it to the rustcord config dir"
-                        .to_string(),
-                );
-                status = "offline".to_string();
-            }
-        }
-
         let input_focus = cx.focus_handle();
         window.focus(&input_focus);
 
-        let events = event_rx;
-        cx.spawn(async move |this, cx| {
-            while let Ok(event) = events.recv().await {
-                if this
-                    .update(cx, |this, cx| {
-                        this.handle_event(event);
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
-
-        Self {
+        let mut this = Self {
             user: None,
             guilds: Vec::new(),
             dms: Vec::new(),
@@ -95,15 +69,106 @@ impl Rustcord {
             input: String::new(),
             input_focus,
             messages_scroll: ScrollHandle::new(),
-            commands: command_tx,
-            status,
-            error,
+            commands: None,
+            status: "offline".to_string(),
+            error: None,
             loading: false,
+            login_open: true,
+            token_input: String::new(),
+            login_error: None,
+            connecting: false,
+            session: 0,
+        };
+
+        if let Some(token) = load_token() {
+            this.begin_login(token, cx);
         }
+
+        this
+    }
+
+    /// (re)starts a discord session for `token`, replacing any worker that is
+    /// already running. the login screen stays up until discord accepts the
+    /// token, so a bad token can be retyped without restarting the app.
+    fn begin_login(&mut self, token: String, cx: &mut Context<Self>) {
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return;
+        }
+
+        let (command_tx, command_rx) = async_channel::unbounded();
+        let (event_tx, event_rx) = async_channel::unbounded();
+
+        self.session += 1;
+        let session = self.session;
+
+        self.commands = Some(command_tx);
+        self.login_open = true;
+        self.connecting = true;
+        self.login_error = None;
+        self.error = None;
+        self.status = "connecting to discord...".to_string();
+
+        discord::spawn_worker(token, command_rx, event_tx);
+
+        let events = event_rx;
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = events.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        if this.session != session {
+                            return;
+                        }
+                        this.handle_event(event);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn submit_login(&mut self, cx: &mut Context<Self>) {
+        if self.connecting {
+            return;
+        }
+        let token = self.token_input.trim().to_string();
+        if token.is_empty() {
+            self.login_error = Some("paste your token first".to_string());
+            return;
+        }
+        self.begin_login(token, cx);
+    }
+
+    fn logout(&mut self) {
+        // dropping the command sender shuts the worker thread and its gateway down
+        self.commands = None;
+        self.session += 1;
+        self.user = None;
+        self.guilds.clear();
+        self.dms.clear();
+        self.channels.clear();
+        self.selected_guild = None;
+        self.selected_channel = None;
+        self.messages.clear();
+        self.input.clear();
+        self.token_input.clear();
+        self.login_open = true;
+        self.login_error = None;
+        self.error = None;
+        self.loading = false;
+        self.connecting = false;
+        self.status = "signed out".to_string();
     }
 
     fn send_command(&self, command: Command) {
-        if self.commands.send_blocking(command).is_err() {
+        let Some(commands) = self.commands.as_ref() else {
+            return;
+        };
+        if commands.send_blocking(command).is_err() {
             // worker thread is gone; nothing useful to do here
         }
     }
@@ -112,6 +177,9 @@ impl Rustcord {
         match event {
             Event::Ready(user) => {
                 self.user = Some(user);
+                self.login_open = false;
+                self.connecting = false;
+                self.login_error = None;
                 self.status = "connected".to_string();
                 self.error = None;
                 self.loading = true;
@@ -164,11 +232,26 @@ impl Rustcord {
                 }
             }
             Event::Error(err) => {
-                self.error = Some(err);
                 self.loading = false;
+                if self.login_open {
+                    self.connecting = false;
+                    self.login_error = Some(err);
+                    self.commands = None;
+                } else {
+                    self.error = Some(err);
+                }
+            }
+            Event::LoginFailed(err) => {
+                self.connecting = false;
+                self.login_error = Some(err);
+                self.status = "offline".to_string();
+                // stop the half-started worker so a retry gets a clean one
+                self.commands = None;
             }
             Event::Status(status) => {
-                self.status = status;
+                if !self.login_open {
+                    self.status = status;
+                }
             }
         }
     }
@@ -214,6 +297,41 @@ impl Rustcord {
         if let Some(first) = self.dms.first() {
             self.select_channel(first.id.clone());
         }
+    }
+
+    fn on_login_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let keystroke = &event.keystroke;
+        let paste = (keystroke.modifiers.control || keystroke.modifiers.platform)
+            && keystroke.key == "v";
+
+        if paste {
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                // tokens are one long word; pasting replaces whatever is there
+                let token: String = text.split_whitespace().collect();
+                if !token.is_empty() {
+                    self.token_input = token;
+                }
+            }
+        } else {
+            match keystroke.key.as_str() {
+                "enter" => {
+                    self.submit_login(cx);
+                    cx.notify();
+                    return;
+                }
+                "backspace" => {
+                    self.token_input.pop();
+                }
+                _ => {
+                    if let Some(text) = keystroke.key_char.as_ref() {
+                        if !keystroke.modifiers.control && !keystroke.modifiers.platform {
+                            self.token_input.push_str(text);
+                        }
+                    }
+                }
+            }
+        }
+        cx.notify();
     }
 
     fn on_composer_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -278,6 +396,111 @@ impl Rustcord {
             .iter()
             .find(|channel| &channel.id == selected)
             .map(Channel::display_name)
+    }
+
+    fn render_login(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focused = self.input_focus.is_focused(window);
+        let busy = self.connecting;
+        let masked: String = "*".repeat(self.token_input.chars().count().min(48));
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .bg(rgb(BG_MAIN))
+            .text_color(rgb(TEXT))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w(px(440.))
+                    .gap_3()
+                    .p_6()
+                    .rounded_lg()
+                    .bg(rgb(BG_SIDEBAR))
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(TEXT))
+                            .child("rustcord"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(MUTED))
+                            .child("paste your discord user token to sign in."),
+                    )
+                    .when_some(self.login_error.clone(), |this, error| {
+                        this.child(div().text_sm().text_color(rgb(DANGER)).child(error))
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(BG_INPUT))
+                            .track_focus(&self.input_focus)
+                            .on_key_down(cx.listener(Self::on_login_key))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &gpui::MouseDownEvent, window, _cx| {
+                                    window.focus(&this.input_focus);
+                                }),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_sm()
+                                    .text_color(if self.token_input.is_empty() {
+                                        rgb(MUTED)
+                                    } else {
+                                        rgb(TEXT)
+                                    })
+                                    .child(if self.token_input.is_empty() {
+                                        "token (ctrl+v to paste)".to_string()
+                                    } else {
+                                        masked
+                                    }),
+                            )
+                            .when(focused, |this| {
+                                this.child(div().w(px(2.)).h(px(16.)).bg(rgb(TEXT)))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("login-button")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .py_2()
+                            .rounded_md()
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0xffffff))
+                            .cursor_pointer()
+                            .when(busy, |this| this.bg(rgb(BG_HOVER)))
+                            .when(!busy, |this| {
+                                this.bg(rgb(ACCENT)).hover(|style| style.bg(rgb(0x4752c4)))
+                            })
+                            .on_click(cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
+                                this.submit_login(cx);
+                                cx.notify();
+                            }))
+                            .child(if busy { "connecting..." } else { "login" }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child("the token is only sent to discord and is not saved. a rejected token just brings you back here."),
+                    ),
+            )
     }
 
     fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -424,16 +647,32 @@ impl Rustcord {
             )
             .child(
                 div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
                     .px_3()
                     .py_2()
                     .border_t_1()
                     .border_color(rgb(BG_RAIL))
                     .text_xs()
                     .text_color(rgb(MUTED))
-                    .child(match self.user.as_ref() {
-                        Some(user) => format!("{}  ·  {}", user.display_name(), self.status),
-                        None => self.status.clone(),
-                    }),
+                    .child(
+                        div().flex_1().child(match self.user.as_ref() {
+                            Some(user) => format!("{}  ·  {}", user.display_name(), self.status),
+                            None => self.status.clone(),
+                        }),
+                    )
+                    .child(
+                        div()
+                            .id("logout-button")
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(rgb(DANGER)))
+                            .on_click(cx.listener(|this, _: &gpui::ClickEvent, _window, _cx| {
+                                this.logout();
+                            }))
+                            .child("sign out"),
+                    ),
             )
     }
 
@@ -595,6 +834,10 @@ impl Rustcord {
 
 impl Render for Rustcord {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.login_open {
+            return self.render_login(window, cx).into_any_element();
+        }
+
         div()
             .flex()
             .flex_row()
@@ -604,6 +847,7 @@ impl Render for Rustcord {
             .child(self.render_rail(cx))
             .child(self.render_channels(cx))
             .child(self.render_messages(window, cx))
+            .into_any_element()
     }
 }
 
